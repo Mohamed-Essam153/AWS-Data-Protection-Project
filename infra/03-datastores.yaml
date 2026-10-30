@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dp-lab data stores - DynamoDB customers table on the DB key, and an optional
+  small RDS PostgreSQL instance (encrypted, private, TLS forced, master password
+  managed in Secrets Manager).
+
+Parameters:
+  EnableRds:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: RDS costs money per hour - turn on for the Week 2/3 evidence, then off again
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  DbEngineVersion:
+    Type: String
+    Default: "17.6"
+    AllowedPattern: "^17\\.[0-9]+$"
+    Description: >-
+      Any PostgreSQL 17 minor version that RDS still offers. Check with
+      aws rds describe-db-engine-versions --engine postgres --default-only
+
+Conditions:
+  WithRds: !Equals [!Ref EnableRds, "true"]
+
+Resources:
+  CustomersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: dp-lab-customers
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customerId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !ImportValue dp-lab-db-key-arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: DataClassification
+          Value: Confidential
+
+  DbParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Condition: WithRds
+    Properties:
+      Description: dp-lab postgres - force TLS for every client connection
+      Family: postgres17
+      Parameters:
+        rds.force_ssl: "1"
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    Condition: WithRds
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: dp-lab-db
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: "20"
+      StorageType: gp3
+      MasterUsername: dpadmin
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        KmsKeyId: !ImportValue dp-lab-secrets-key-arn
+      StorageEncrypted: true
+      KmsKeyId: !ImportValue dp-lab-db-key-arn
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      DeleteAutomatedBackups: true
+      DBParameterGroupName: !Ref DbParameterGroup
+      Tags:
+        - Key: DataClassification
+          Value: Confidential
+
+Outputs:
+  TableName:
+    Value: !Ref CustomersTable
+    Export:
+      Name: dp-lab-customers-table
+  TableArn:
+    Value: !GetAtt CustomersTable.Arn
+    Export:
+      Name: dp-lab-customers-table-arn
+  DatabaseEndpoint:
+    Condition: WithRds
+    Value: !GetAtt Database.Endpoint.Address
