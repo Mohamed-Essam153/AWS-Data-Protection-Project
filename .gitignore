@@ -1,0 +1,27 @@
+# local settings and anything secret
+config.env
+.env
+*.pem
+*.key
+*.p12
+.aws/
+
+# generated fake data
+data/
+
+# KMS lab leftovers
+*.bin
+plain.txt
+
+# build / python
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+~$*.xlsx
+.vscode/
+.idea/
