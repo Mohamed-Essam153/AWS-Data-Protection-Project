@@ -1,0 +1,4 @@
+digraph G { graph [fontname="Helvetica", bgcolor="white", pad=0.4, nodesep=0.5, ranksep=0.6]; node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor="#F2F5FA", color="#1F3A5F"]; edge [fontname="Helvetica", fontsize=9, color="#1F3A5F"]; rankdir=LR; label="Cloud Data Lifecycle"; labelloc=t; fontsize=16;
+c [label="Create\nclassify + tag\nMacie · Cognito"]; s [label="Store\nSSE-KMS · versioning\nBPA · bucket policy"]; u [label="Use\nIAM least privilege\naccess points · CloudTrail"];
+sh [label="Share\naccess points · presigned URLs\nAccess Analyzer"]; a [label="Archive\nGlacier classes\n(still SSE-KMS)"]; d [label="Destroy\nlifecycle expiry\ncrypto-shredding", fillcolor="#FBE3E3"];
+c -> s -> u -> sh -> a -> d; }

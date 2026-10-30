@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dp-lab S3 - the data bucket (classified prefixes, SSE-KMS, versioning, access logs,
+  lifecycle), its bucket policy, an analytics access point limited to internal/,
+  and IAM Access Analyzer.
+
+Parameters:
+  Suffix:
+    Type: String
+    AllowedPattern: "^[a-z0-9]{4,8}$"
+  CreateAccessAnalyzer:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to false if the account already has an account-level analyzer in this region
+
+Conditions:
+  MakeAnalyzer: !Equals [!Ref CreateAccessAnalyzer, "true"]
+
+Resources:
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub dp-lab-logs-${Suffix}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      # Server access log destinations only support SSE-S3.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-access-logs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${LogsBucket.Arn}/data-bucket/*
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::dp-lab-data-${Suffix}
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt LogsBucket.Arn
+              - !Sub ${LogsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LogsBucketPolicy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub dp-lab-data-${Suffix}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !ImportValue dp-lab-s3-key-arn
+            BucketKeyEnabled: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: data-bucket/
+      LifecycleConfiguration:
+        Rules:
+          - Id: archive-internal
+            Status: Enabled
+            Prefix: internal/
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+            ExpirationInDays: 365
+          - Id: restricted-short-retention
+            Status: Enabled
+            Prefix: restricted/
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+            ExpirationInDays: 180
+          - Id: cleanup-old-versions-and-uploads
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: DataClassification
+          Value: Restricted
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub ${DataBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: DenyOldTLS
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub ${DataBucket.Arn}/*
+            Condition:
+              NumericLessThan:
+                s3:TlsVersion: "1.2"
+          # Rejects uploads that explicitly ask for anything other than SSE-KMS.
+          # Uploads with no header still go through and get the bucket default (SSE-KMS).
+          - Sid: DenyWrongEncryptionHeader
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub ${DataBucket.Arn}/*
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+              "Null":
+                s3:x-amz-server-side-encryption: "false"
+          - Sid: DelegateToAccountAccessPoints
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub ${DataBucket.Arn}/*
+            Condition:
+              StringEquals:
+                s3:DataAccessPointAccount: !Ref AWS::AccountId
+
+  AnalyticsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dp-lab-analytics-role
+      Description: Test role for the analytics team - may read internal/ through the access point only
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-through-access-point
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: GetViaAccessPoint
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:${AWS::Region}:${AWS::AccountId}:accesspoint/dp-lab-analytics-ap/object/*
+              - Sid: DecryptS3KeyThroughS3
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !ImportValue dp-lab-s3-key-arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+
+  AnalyticsAccessPoint:
+    Type: AWS::S3::AccessPoint
+    Properties:
+      Name: dp-lab-analytics-ap
+      Bucket: !Ref DataBucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Policy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AnalyticsReadInternalOnly
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt AnalyticsRole.Arn
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:${AWS::Region}:${AWS::AccountId}:accesspoint/dp-lab-analytics-ap/object/internal/*
+
+  AccountAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Condition: MakeAnalyzer
+    Properties:
+      AnalyzerName: dp-lab-analyzer
+      Type: ACCOUNT
+
+Outputs:
+  DataBucketName:
+    Value: !Ref DataBucket
+    Export:
+      Name: dp-lab-data-bucket
+  DataBucketArn:
+    Value: !GetAtt DataBucket.Arn
+    Export:
+      Name: dp-lab-data-bucket-arn
+  LogsBucketName:
+    Value: !Ref LogsBucket
+  AnalyticsRoleArn:
+    Value: !GetAtt AnalyticsRole.Arn
+  AccessPointArn:
+    Value: !GetAtt AnalyticsAccessPoint.Arn
