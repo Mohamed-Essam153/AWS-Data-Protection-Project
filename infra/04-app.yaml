@@ -1,0 +1,364 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dp-lab demo app - REST API (TLS 1.2+ policy, Cognito authorizer, throttling,
+  access logs) in front of a least-privilege Lambda that reads DynamoDB, S3,
+  Secrets Manager and Parameter Store. Optional AWS WAF web ACL.
+
+Parameters:
+  LambdaS3Key:
+    Type: String
+    Description: Key of the zipped handler inside the artifacts bucket (set by scripts/deploy.sh)
+  EnableWaf:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: WAF has a monthly charge per web ACL and rule - enable for the Week 3 tests and the demo
+  EndpointAccessMode:
+    Type: String
+    Default: BASIC
+    AllowedValues: [BASIC, STRICT]
+  ThrottleRate:
+    Type: Number
+    Default: 5
+  ThrottleBurst:
+    Type: Number
+    Default: 10
+
+Conditions:
+  WithWaf: !Equals [!Ref EnableWaf, "true"]
+
+Resources:
+  # ---------------------------------------------------------------- secrets & config
+  PartnerApiKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: dp-lab/thirdparty/api-key
+      Description: Fake third-party API key used by the demo function
+      KmsKeyId: !ImportValue dp-lab-secrets-key-arn
+      GenerateSecretString:
+        SecretStringTemplate: '{"provider": "fake-partner"}'
+        GenerateStringKey: api_key
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  TableNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /dp-lab/app/table-name
+      Type: String
+      Value: !ImportValue dp-lab-customers-table
+      Description: Plain config value (not secret)
+
+  # ---------------------------------------------------------------- Lambda
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/dp-lab-api-fn
+      RetentionInDays: 14
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dp-lab-api-fn-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: dp-lab-api-least-privilege
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteOwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${FunctionLogGroup.Arn}:*
+              - Sid: ReadOneTable
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !ImportValue dp-lab-customers-table-arn
+              - Sid: ListInternalPrefixOnly
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !ImportValue dp-lab-data-bucket-arn
+                Condition:
+                  StringLike:
+                    s3:prefix: internal/*
+              - Sid: ReadOneSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref PartnerApiKey
+              - Sid: ReadAppParams
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dp-lab/app/*
+              - Sid: DecryptSecretsKeyViaServices
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !ImportValue dp-lab-secrets-key-arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService:
+                      - !Sub secretsmanager.${AWS::Region}.amazonaws.com
+                      - !Sub ssm.${AWS::Region}.amazonaws.com
+              - Sid: DecryptDbKeyViaDynamoDB
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !ImportValue dp-lab-db-key-arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub dynamodb.${AWS::Region}.amazonaws.com
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: dp-lab-api-fn
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Timeout: 10
+      MemorySize: 256
+      Role: !GetAtt FunctionRole.Arn
+      Code:
+        S3Bucket: !ImportValue dp-lab-artifacts-bucket
+        S3Key: !Ref LambdaS3Key
+      LoggingConfig:
+        LogGroup: !Ref FunctionLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue dp-lab-customers-table
+          BUCKET_NAME: !ImportValue dp-lab-data-bucket
+          SECRET_ID: !Ref PartnerApiKey
+          PARAM_NAME: /dp-lab/app/partner-endpoint
+
+  # ---------------------------------------------------------------- Cognito
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: dp-lab-users
+      UsernameAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: dp-lab-cli
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      IdTokenValidity: 60
+      AccessTokenValidity: 60
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+
+  # ---------------------------------------------------------------- API Gateway
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: dp-lab-api
+      Description: Demo API for the data protection project
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      # Regional REST APIs default to TLS_1_0. This policy only accepts TLS 1.2 and 1.3.
+      SecurityPolicy: SecurityPolicy_TLS13_1_2_2021_06
+      EndpointAccessMode: !Ref EndpointAccessMode
+
+  Authorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: dp-lab-cognito
+      RestApiId: !Ref Api
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  CustomerResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: customer
+
+  CustomerGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref CustomerResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref Authorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations
+
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/GET/customer
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: CustomerGet
+    Properties:
+      RestApiId: !Ref Api
+
+  ApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /aws/apigateway/dp-lab-api
+      RetentionInDays: 14
+
+  ApiGatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dp-lab-apigw-cloudwatch
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  # Account-wide setting: API Gateway needs a role before any stage can write logs.
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayLoggingRole.Arn
+
+  ProdStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref Deployment
+      StageName: prod
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: !Ref ThrottleRate
+          ThrottlingBurstLimit: !Ref ThrottleBurst
+          MetricsEnabled: true
+      # Access logs only - no request/response bodies, so no customer data ends up in logs.
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","time":"$context.requestTime","method":"$context.httpMethod","path":"$context.resourcePath","status":"$context.status","protocol":"$context.protocol","user":"$context.authorizer.claims.sub","waf":"$context.waf.status"}'
+
+  # ---------------------------------------------------------------- WAF (optional)
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Condition: WithWaf
+    Properties:
+      Name: dp-lab-api-acl
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: dp-lab-api-acl
+      Rules:
+        - Name: aws-common
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-common
+        - Name: aws-known-bad-inputs
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-known-bad-inputs
+        - Name: rate-limit-per-ip
+          Priority: 3
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 100
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-limit-per-ip
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: WithWaf
+    Properties:
+      ResourceArn: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${Api}/stages/${ProdStage}
+      WebACLArn: !GetAtt WebAcl.Arn
+
+  # ---------------------------------------------------------------- cert expiry alert
+  AcmExpiryRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: dp-lab-acm-expiry
+      Description: Alert when an ACM certificate is close to expiry
+      EventPattern:
+        source:
+          - aws.acm
+        detail-type:
+          - ACM Certificate Approaching Expiration
+      Targets:
+        - Id: alerts
+          Arn: !ImportValue dp-lab-alerts-topic-arn
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${ProdStage}/customer
+  ApiId:
+    Value: !Ref Api
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  SecretArn:
+    Value: !Ref PartnerApiKey
+  FunctionName:
+    Value: !Ref ApiFunction
+  WafEnabled:
+    Value: !Ref EnableWaf

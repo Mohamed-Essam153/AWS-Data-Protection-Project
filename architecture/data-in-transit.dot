@@ -1,0 +1,8 @@
+digraph G { graph [fontname="Helvetica", bgcolor="white", pad=0.4, nodesep=0.5, ranksep=0.6]; node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor="#F2F5FA", color="#1F3A5F"]; edge [fontname="Helvetica", fontsize=9, color="#1F3A5F"]; rankdir=LR; label="Data-in-Transit Architecture"; labelloc=t; fontsize=16;
+client [label="Client", fillcolor="#FFFFFF"]; onprem [label="Branch office\n(concept)", fillcolor="#FFFFFF", style="rounded,dashed"];
+waf [label="AWS WAF (optional)"]; api [label="API Gateway\nCognito JWT"]; lam [label="Lambda"];
+subgraph cluster_vpc { label="AWS services"; style="rounded,dashed"; color="#7A8CA5";
+ s3 [label="S3\nSecureTransport + TLS≥1.2"]; ddb [label="DynamoDB"]; sm [label="Secrets Manager"]; ssm [label="SSM"]; kms [label="KMS"]; rds [label="RDS (optional)\nrds.force_ssl=1"]; vpce [label="VPC endpoints\n(design)", style="rounded,dashed"]; vgw [label="VGW / TGW", style="rounded,dashed"]; }
+client -> waf [label="TLS 1.2+ only (API security policy)"]; waf -> api; api -> lam [label="IAM invoke"];
+lam -> s3 [label="HTTPS+SigV4"]; lam -> ddb [label="HTTPS+SigV4"]; lam -> sm [label="HTTPS+SigV4"]; lam -> ssm [label="HTTPS+SigV4"]; lam -> kms [label="HTTPS+SigV4"];
+lam -> rds [label="TLS", style=dashed]; lam -> vpce [style=dashed]; onprem -> vgw [label="IPsec (2 tunnels)", style=dashed]; }
