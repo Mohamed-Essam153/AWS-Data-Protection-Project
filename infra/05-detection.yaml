@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dp-lab detection - Amazon Macie with a custom EmployeeID identifier, GuardDuty with
+  S3 Protection, and EventBridge rules that email findings to the team.
+  Both services are optional because they cost money after the trial period.
+
+Parameters:
+  EnableMacie:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  EnableGuardDuty:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Set to false if the account already has a GuardDuty detector in this region
+
+Conditions:
+  WithMacie: !Equals [!Ref EnableMacie, "true"]
+  WithGuardDuty: !Equals [!Ref EnableGuardDuty, "true"]
+
+Resources:
+  MacieSession:
+    Type: AWS::Macie::Session
+    Condition: WithMacie
+    Properties:
+      Status: ENABLED
+      FindingPublishingFrequency: FIFTEEN_MINUTES
+
+  EmployeeIdIdentifier:
+    Type: AWS::Macie::CustomDataIdentifier
+    Condition: WithMacie
+    DependsOn: MacieSession
+    Properties:
+      Name: EmployeeID
+      Description: Internal employee number, e.g. EMP-123456
+      Regex: "EMP-\\d{6}"
+      Keywords:
+        - emp_id
+        - employee
+      MaximumMatchDistance: 50
+
+  MacieFindingsRule:
+    Type: AWS::Events::Rule
+    Condition: WithMacie
+    Properties:
+      Name: dp-lab-macie-findings
+      EventPattern:
+        source:
+          - aws.macie
+        detail-type:
+          - Macie Finding
+      Targets:
+        - Id: alerts
+          Arn: !ImportValue dp-lab-alerts-topic-arn
+
+  Detector:
+    Type: AWS::GuardDuty::Detector
+    Condition: WithGuardDuty
+    Properties:
+      Enable: true
+      FindingPublishingFrequency: FIFTEEN_MINUTES
+      Features:
+        - Name: S3_DATA_EVENTS
+          Status: ENABLED
+
+  GuardDutyHighRule:
+    Type: AWS::Events::Rule
+    Condition: WithGuardDuty
+    Properties:
+      Name: dp-lab-guardduty-high
+      Description: GuardDuty findings with severity 7 or higher
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - GuardDuty Finding
+        detail:
+          severity:
+            - numeric:
+                - ">="
+                - 7
+      Targets:
+        - Id: alerts
+          Arn: !ImportValue dp-lab-alerts-topic-arn
+
+Outputs:
+  EmployeeIdIdentifierId:
+    Condition: WithMacie
+    Value: !GetAtt EmployeeIdIdentifier.Id
+  DetectorId:
+    Condition: WithGuardDuty
+    Value: !Ref Detector
