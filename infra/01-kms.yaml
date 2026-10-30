@@ -1,0 +1,416 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dp-lab KMS - five customer managed keys (one per data domain), yearly rotation,
+  key policies that split key administration from key use, and an alert on
+  critical key changes.
+
+Parameters:
+  KeyAdminRoleArn:
+    Type: String
+    Description: IAM role allowed to manage the keys (no encrypt/decrypt)
+  KeyUserRoleArn:
+    Type: String
+    Description: IAM role allowed to use the keys for crypto operations
+  PendingWindowInDays:
+    Type: Number
+    Default: 7
+    MinValue: 7
+    MaxValue: 30
+
+Resources:
+  # ---------------------------------------------------------------- S3 key
+  S3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: dp-lab key for the S3 data bucket (including Glacier IR objects)
+      EnableKeyRotation: true
+      RotationPeriodInDays: 365
+      PendingWindowInDays: !Ref PendingWindowInDays
+      Tags:
+        - Key: DataClassification
+          Value: Restricted
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: KeyAdministrators
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:RotateKeyOnDemand
+            Resource: "*"
+          - Sid: KeyUsersCryptoOnly
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: AllowGrantsForAWSResources
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: "true"
+          # Macie's service-linked role only exists after Macie is enabled, so we match it
+          # by ARN instead of naming it as a principal (that would fail if it doesn't exist yet).
+          - Sid: AllowMacieToDecrypt
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                aws:PrincipalArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/macie.amazonaws.com/AWSServiceRoleForAmazonMacie
+
+  S3KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/dp-lab-s3
+      TargetKeyId: !Ref S3Key
+
+  # ---------------------------------------------------------------- DB key
+  DbKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: dp-lab key for RDS and DynamoDB
+      EnableKeyRotation: true
+      RotationPeriodInDays: 365
+      PendingWindowInDays: !Ref PendingWindowInDays
+      Tags:
+        - Key: DataClassification
+          Value: Confidential
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: KeyAdministrators
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:RotateKeyOnDemand
+            Resource: "*"
+          - Sid: KeyUsersCryptoOnly
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: AllowGrantsForAWSResources
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: "true"
+
+  DbKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/dp-lab-db
+      TargetKeyId: !Ref DbKey
+
+  # ---------------------------------------------------------------- EBS key
+  EbsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: dp-lab default key for new EBS volumes
+      EnableKeyRotation: true
+      RotationPeriodInDays: 365
+      PendingWindowInDays: !Ref PendingWindowInDays
+      Tags:
+        - Key: DataClassification
+          Value: Internal
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: KeyAdministrators
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:RotateKeyOnDemand
+            Resource: "*"
+          - Sid: KeyUsersCryptoOnly
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: AllowGrantsForAWSResources
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: "true"
+
+  EbsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/dp-lab-ebs
+      TargetKeyId: !Ref EbsKey
+
+  # ---------------------------------------------------------------- Secrets key
+  SecretsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: dp-lab key for Secrets Manager and Parameter Store SecureStrings
+      EnableKeyRotation: true
+      RotationPeriodInDays: 365
+      PendingWindowInDays: !Ref PendingWindowInDays
+      Tags:
+        - Key: DataClassification
+          Value: Restricted
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: KeyAdministrators
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:RotateKeyOnDemand
+            Resource: "*"
+          - Sid: KeyUsersCryptoOnly
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: AllowGrantsForAWSResources
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: "true"
+
+  SecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/dp-lab-secrets
+      TargetKeyId: !Ref SecretsKey
+
+  # ---------------------------------------------------------------- Demo key
+  # The only key we ever disable on purpose (KMS lab, test T08).
+  DemoKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: dp-lab demo key for the KMS lab - safe to disable
+      EnableKeyRotation: true
+      RotationPeriodInDays: 365
+      PendingWindowInDays: !Ref PendingWindowInDays
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: KeyAdministrators
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdminRoleArn
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:RotateKeyOnDemand
+            Resource: "*"
+          - Sid: KeyUsersCryptoOnly
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyUserRoleArn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+
+  DemoKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/dp-lab-demo
+      TargetKeyId: !Ref DemoKey
+
+  # ---------------------------------------------------------------- alert
+  KmsCriticalChangesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: dp-lab-kms-critical-changes
+      Description: Email the team when a key is disabled, scheduled for deletion or its policy changes
+      EventPattern:
+        source:
+          - aws.kms
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - kms.amazonaws.com
+          eventName:
+            - DisableKey
+            - ScheduleKeyDeletion
+            - PutKeyPolicy
+      Targets:
+        - Id: alerts
+          Arn: !ImportValue dp-lab-alerts-topic-arn
+
+Outputs:
+  S3KeyArn:
+    Value: !GetAtt S3Key.Arn
+    Export:
+      Name: dp-lab-s3-key-arn
+  DbKeyArn:
+    Value: !GetAtt DbKey.Arn
+    Export:
+      Name: dp-lab-db-key-arn
+  EbsKeyArn:
+    Value: !GetAtt EbsKey.Arn
+    Export:
+      Name: dp-lab-ebs-key-arn
+  SecretsKeyArn:
+    Value: !GetAtt SecretsKey.Arn
+    Export:
+      Name: dp-lab-secrets-key-arn
+  DemoKeyId:
+    Value: !Ref DemoKey
+    Export:
+      Name: dp-lab-demo-key-id
