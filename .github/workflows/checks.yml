@@ -1,0 +1,36 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: pip install cfn-lint -r tests/requirements.txt
+
+      - name: Lint CloudFormation
+        run: cfn-lint infra/*.yaml
+
+      - name: Shellcheck
+        run: shellcheck -x -S warning scripts/*.sh tests/run-tests.sh
+
+      - name: Lambda unit tests
+        run: python -m pytest tests/unit -q
+
+      - name: Internal links
+        run: python tools/check_links.py
+
+      # Some official sites rate-limit or block CI runners, so this one only warns.
+      - name: External links
+        continue-on-error: true
+        run: python tools/check_links.py --external

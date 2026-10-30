@@ -1,0 +1,17 @@
+digraph G { graph [fontname="Helvetica", bgcolor="white", pad=0.4, nodesep=0.5, ranksep=0.6]; node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor="#F2F5FA", color="#1F3A5F"]; edge [fontname="Helvetica", fontsize=9, color="#1F3A5F"]; rankdir=LR; label="AWS Data Protection Project: Main Architecture (us-east-1)"; labelloc=t; fontsize=16;
+client [label="Client\n(curl / app)", fillcolor="#FFFFFF"];
+subgraph cluster_edge { label="Edge & API (Week 3)"; style="rounded,dashed"; color="#7A8CA5";
+  waf [label="AWS WAF (optional)
+Core rules · Bad inputs · Rate"]; apigw [label="API Gateway (REST)\nCognito authorizer · Throttling\nTLS 1.2+ policy · Access logs"]; cognito [label="Amazon Cognito\nUser pool"]; lam [label="Lambda dp-lab-api-fn\nLeast-privilege role"]; }
+subgraph cluster_data { label="Data stores: encrypted at rest (weeks 1-2)"; style="rounded,dashed"; color="#7A8CA5";
+  s3 [label="S3 dp-lab-data\nBPA · Versioning · SSE-KMS\nBucket policy · Access point · Lifecycle"]; ddb [label="DynamoDB\ndp-lab-customers"]; rds [label="RDS PostgreSQL (optional)\nforce_ssl · encrypted"]; glacier [label="S3 Glacier IR\narchive/"]; ebs [label="EBS default\nencryption"]; art [label="S3 artifacts\nLambda zip"]; }
+subgraph cluster_sec { label="Keys & secrets"; style="rounded,dashed"; color="#7A8CA5";
+  kms [label="AWS KMS\ns3 · db · ebs · secrets · demo\nrotation 365 d", fillcolor="#FFF3D6"]; sm [label="Secrets Manager"]; ssm [label="Parameter Store\nSecureString"]; }
+subgraph cluster_det { label="Detect & govern (Week 4)"; style="rounded,dashed"; color="#7A8CA5";
+  macie [label="Amazon Macie"]; gd [label="GuardDuty\nS3 Protection"]; aa [label="IAM Access Analyzer"]; ct [label="CloudTrail\n(log validation)"]; eb [label="EventBridge"]; sns [label="SNS\nsecurity alerts"]; }
+client -> waf [label="HTTPS"]; waf -> apigw; apigw -> cognito [label="JWT", style=dashed]; apigw -> lam;
+lam -> ddb [label="SigV4/TLS"]; lam -> s3 [label="SigV4/TLS"]; lam -> sm; lam -> ssm; art -> lam [style=dashed, label="code"];
+s3 -> glacier [label="lifecycle"]; kms -> s3 [style=dotted]; kms -> ddb [style=dotted]; kms -> rds [style=dotted]; kms -> ebs [style=dotted]; kms -> sm [style=dotted]; kms -> ssm [style=dotted];
+macie -> s3 [label="scan", style=dashed]; gd -> s3 [label="monitor", style=dashed]; aa -> s3 [style=dashed];
+ct -> eb; macie -> eb; gd -> eb; eb -> sns;
+}
